@@ -41,7 +41,7 @@ def train_model(train_data_path, validation_data_path, output_model):
             .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
             .getOrCreate()
 
-        bucketname = "winemodelbucket"
+        bucketname = "rtpmodelbucket"
 
         train_data = f"s3a://{bucketname}/{train_data_path}"
         validation_data = f"s3a://{bucketname}/{validation_data_path}"
