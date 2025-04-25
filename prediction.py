@@ -1,44 +1,53 @@
 from pyspark.sql import SparkSession
+from pyspark.ml.classification import GBTClassifier
 from pyspark.ml.feature import VectorAssembler
-from pyspark.ml.classification import RandomForestClassifier
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 
 # Initialize Spark session
-spark = SparkSession.builder \
-    .appName("WineQualityPrediction") \
-    .getOrCreate()
+spark = SparkSession.builder.appName("GBTModelPrediction").getOrCreate()
 
-# Load datasets with proper delimiter and quote
-val_data = spark.read.option("header", "true").option("delimiter", ";").option("quote", '"').csv("s3a://rtpmodelbucket/ValidationDataset.csv")
-train_data = spark.read.option("header", "true").option("delimiter", ";").option("quote", '"').csv("s3a://rtpmodelbucket/TrainingDataset.csv")
+# Load datasets
+train_data = spark.read.csv("s3a://rtpmodelbucket/TrainingDataset.csv", header=True, inferSchema=True)
+val_data = spark.read.csv("s3a://rtpmodelbucket/ValidationDataset.csv", header=True, inferSchema=True)
 
-# Strip quotes from column names
-val_data = val_data.toDF(*[col.strip('"') for col in val_data.columns])
+# Clean column names
 train_data = train_data.toDF(*[col.strip('"') for col in train_data.columns])
+val_data = val_data.toDF(*[col.strip('"') for col in val_data.columns])
 
-# Convert all columns to float
-features = [col for col in train_data.columns if col != "quality"]
-for col_name in features + ["quality"]:
-    train_data = train_data.withColumn(col_name, train_data[col_name].cast("float"))
-    val_data = val_data.withColumn(col_name, val_data[col_name].cast("float"))
+# Cast columns to float
+for column in train_data.columns:
+    train_data = train_data.withColumn(column, train_data[column].cast("float"))
+    val_data = val_data.withColumn(column, val_data[column].cast("float"))
+
+# Filter for binary classification: quality == 0 or 1
+train_data = train_data.filter((train_data["quality"] == 0) | (train_data["quality"] == 1))
+val_data = val_data.filter((val_data["quality"] == 0) | (val_data["quality"] == 1))
 
 # Assemble features
-assembler = VectorAssembler(inputCols=features, outputCol="features")
+feature_cols = [col for col in train_data.columns if col != "quality"]
+assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
 train_data = assembler.transform(train_data)
 val_data = assembler.transform(val_data)
 
-# Train RandomForestClassifier for multiclass
-rf = RandomForestClassifier(labelCol="quality", featuresCol="features", numTrees=50)
-model = rf.fit(train_data)
+# Train GBT model
+gbt = GBTClassifier(labelCol="quality", featuresCol="features", maxIter=50)
+model = gbt.fit(train_data)
 
-# Predict
+# Make predictions
 predictions = model.transform(val_data)
 
-# Evaluate
-evaluator = MulticlassClassificationEvaluator(labelCol="quality", predictionCol="prediction", metricName="accuracy")
-accuracy = evaluator.evaluate(predictions)
-
+# Evaluate using Accuracy
+accuracy_evaluator = MulticlassClassificationEvaluator(
+    labelCol="quality", predictionCol="prediction", metricName="accuracy"
+)
+accuracy = accuracy_evaluator.evaluate(predictions)
 print(f"Test Accuracy: {accuracy:.4f}")
 
-# Stop Spark
+# Evaluate using F1 Score
+f1_evaluator = MulticlassClassificationEvaluator(
+    labelCol="quality", predictionCol="prediction", metricName="f1"
+)
+f1_score = f1_evaluator.evaluate(predictions)
+print(f"Test F1 Score: {f1_score:.4f}")
+
 spark.stop()
