@@ -14,7 +14,7 @@ def prepare_input(df):
     df = df.toDF(*renamed_cols)
 
     # Index target column
-    label_indexer = StringIndexer(inputCol="quality", outputCol="label")
+    label_indexer = StringIndexer(inputCol="quality", outputCol="label", handleInvalid="keep")
     df = label_indexer.fit(df).transform(df)
 
     # Assemble feature columns
