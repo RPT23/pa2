@@ -38,7 +38,7 @@ def predict_using_model(test_data_path, output_model):
     spark = SparkSession.builder.appName("WineQualityPrediction").config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem").getOrCreate()
 	
 	# S3 bucket which will have the input files
-    bucketname = "winemodelbucket"
+    bucketname = "rtpmodelbucket"
 
     # Load data from S3 bucket using the input path provided
     test_data = f"s3a://{bucketname}/{test_data_path}"
