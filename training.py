@@ -1,96 +1,138 @@
 from pyspark.sql import SparkSession
-from pyspark.ml import Pipeline
-from pyspark.ml.classification import GBTClassifier
+from pyspark.ml.classification import RandomForestClassifier, LogisticRegression, DecisionTreeClassifier
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
+from pyspark.ml import Pipeline
 from pyspark.ml.feature import StringIndexer, VectorAssembler
-from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 import time
 import sys
 
-def preprocess_data(df):
+def prepare_data(input_data):
     try:
-        cleaned_cols = [col.replace('"', '') for col in df.columns]
-        df = df.toDF(*cleaned_cols)
+        # Update column names to remove quotes if present
+        new_columns = [col.replace('"', '') for col in input_data.columns]
+        input_data = input_data.toDF(*new_columns)
 
-        label_indexer = StringIndexer(inputCol="quality", outputCol="label")
-        df = label_indexer.fit(df).transform(df)
+        label_column = 'quality'
 
-        features = [col for col in df.columns if col not in ("quality", "label")]
-        assembler = VectorAssembler(inputCols=features, outputCol="features")
-        df = assembler.transform(df)
+        # Index the 'quality' column
+        indexer = StringIndexer(inputCol=label_column, outputCol="label")
+        input_data = indexer.fit(input_data).transform(input_data)
 
-        return df
-    except Exception as err:
-        print(f"Data processing error: {err}")
+        # Select relevant feature columns
+        feature_columns = [col for col in input_data.columns if col != label_column]
+
+        # Create a VectorAssembler to combine feature columns
+        assembler = VectorAssembler(inputCols=feature_columns, outputCol="features")
+
+        # Apply the assembler
+        assembled_data = assembler.transform(input_data)
+
+        return assembled_data
+    except Exception as e:
+        print(f"Error preparing data: {e}")
         sys.exit(1)
 
-def train_and_evaluate(train_file, valid_file, model_output):
+def train_model(train_data_path, validation_data_path, output_model):
     try:
+        # Initialize Spark session
         spark = SparkSession.builder \
-            .appName("WineQualityGBTModel") \
+            .appName("WineQualityTraining") \
             .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
             .getOrCreate()
 
-        bucket = "rtpmodelbucket"
-        train_path = f"s3a://{bucket}/{train_file}"
-        valid_path = f"s3a://{bucket}/{valid_file}"
+        bucketname = "winemodelbucket"
 
-        train_raw = spark.read.csv(train_path, header=True, inferSchema=True, sep=";")
-        valid_raw = spark.read.csv(valid_path, header=True, inferSchema=True, sep=";")
+        train_data = f"s3a://{bucketname}/{train_data_path}"
+        validation_data = f"s3a://{bucketname}/{validation_data_path}"
 
-        train_df = preprocess_data(train_raw)
-        valid_df = preprocess_data(valid_raw)
+        # Load datasets
+        training_raw_data = spark.read.csv(train_data, header=True, inferSchema=True, sep=";")
+        validation_raw_data = spark.read.csv(validation_data, header=True, inferSchema=True, sep=";")
 
-        # Only use GBTClassifier
-        gbt = GBTClassifier(labelCol="label", featuresCol="features", maxIter=10)
+        train_data = prepare_data(training_raw_data)
+        validation_data = prepare_data(validation_raw_data)
 
-        param_grid = ParamGridBuilder() \
-            .addGrid(gbt.maxIter, [10, 20, 30]) \
-            .addGrid(gbt.maxDepth, [3, 5, 7]) \
-            .build()
+        # Define models
+        rf = RandomForestClassifier(labelCol="label", featuresCol="features")
+        lr = LogisticRegression(labelCol="label", featuresCol="features")
+        dt = DecisionTreeClassifier(labelCol="label", featuresCol="features")
+        models = [rf, lr, dt]
 
+        # Create parameter grids
+        paramGrids = [
+            ParamGridBuilder()
+                .addGrid(rf.numTrees, [10, 20, 30])
+                .build(),
+            ParamGridBuilder()
+                .addGrid(lr.maxIter, [10, 20, 30])
+                .build(),
+            ParamGridBuilder()
+                .addGrid(dt.maxDepth, [5, 10, 15])
+                .build()
+        ]
+
+        # Define evaluator
         evaluator = MulticlassClassificationEvaluator(
             labelCol="label", predictionCol="prediction", metricName="f1"
         )
 
-        pipeline = Pipeline(stages=[gbt])
-
-        crossval = CrossValidator(
-            estimator=pipeline,
-            estimatorParamMaps=param_grid,
-            evaluator=evaluator,
-            numFolds=3
-        )
-
+        results = []
         start_time = time.time()
 
-        cv_model = crossval.fit(train_df)
-        preds = cv_model.transform(valid_df)
+        for i, model in enumerate(models):
+            print(f"Training model {i + 1} ({model.__class__.__name__})")
 
-        accuracy = evaluator.evaluate(preds, {evaluator.metricName: "accuracy"})
-        recall = evaluator.evaluate(preds, {evaluator.metricName: "weightedRecall"})
-        f1_score = evaluator.evaluate(preds, {evaluator.metricName: "f1"})
+            # Create a pipeline
+            pipeline = Pipeline(stages=[model])
 
-        print("Evaluation Metrics:")
-        print(f"Accuracy: {accuracy:.4f}")
-        print(f"Recall: {recall:.4f}")
-        print(f"F1 Score: {f1_score:.4f}")
+            crossvalidate = CrossValidator(
+                estimator=pipeline,
+                estimatorParamMaps=paramGrids[i],
+                evaluator=evaluator,
+                numFolds=3
+            )
 
-        best_model = cv_model.bestModel
-        model_path = f"s3a://{bucket}/{model_output}"
-        best_model.save(model_path)
+            # Fit the model
+            cvModel = crossvalidate.fit(train_data)
 
-        print(f"Training completed in {time.time() - start_time:.2f} seconds")
+            # Predict on validation data
+            predictions = cvModel.transform(validation_data)
 
+            # Evaluate metrics
+            accuracy = evaluator.evaluate(predictions, {evaluator.metricName: "accuracy"})
+            recall = evaluator.evaluate(predictions, {evaluator.metricName: "weightedRecall"})
+            f1_score = evaluator.evaluate(predictions, {evaluator.metricName: "f1"})
+
+            results.append({
+                "Model": model.__class__.__name__,
+                "Accuracy": accuracy,
+                "Recall": recall,
+                "F1 Score": f1_score
+            })
+
+        # Save the best model if this is the last iteration
+        best_model = cvModel.bestModel
+
+        # Save the best model to S3
+        best_model_path = f"s3a://{bucketname}/{output_model}"
+        best_model.save(best_model_path)
+
+        # Log overall results
+        print("Training completed in {:.2f} seconds".format(time.time() - start_time))
+
+        for result in results:
+            print(result)
+
+        # Stop Spark session
         spark.stop()
-
-    except Exception as ex:
-        print(f"Training error: {ex}")
+    except Exception as e:
+        print(f"Error during model training: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
-    train_file = "TrainingDataset.csv"
-    valid_file = "ValidationDataset.csv"
-    model_output = "gbt_trained_model_output"
+    train_data_path = "TrainingDataset.csv"
+    validation_data_path = "ValidationDataset.csv"
+    output_model = "trainingmodel.model"
 
-    train_and_evaluate(train_file, valid_file, model_output)
+    train_model(train_data_path, validation_data_path, output_model)
