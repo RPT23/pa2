@@ -1,40 +1,40 @@
 from pyspark.sql import SparkSession
 from pyspark.ml.feature import VectorAssembler
-from pyspark.ml.classification import GBTClassifier
+from pyspark.ml.classification import RandomForestClassifier
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 
 # Initialize Spark session
 spark = SparkSession.builder \
-    .appName("GBTModelPrediction") \
+    .appName("WineQualityPrediction") \
     .getOrCreate()
 
-# Load validation and training data from S3 with proper quote handling
+# Load datasets with proper delimiter and quote
 val_data = spark.read.option("header", "true").option("delimiter", ";").option("quote", '"').csv("s3a://rtpmodelbucket/ValidationDataset.csv")
 train_data = spark.read.option("header", "true").option("delimiter", ";").option("quote", '"').csv("s3a://rtpmodelbucket/TrainingDataset.csv")
 
-# Clean up column names to strip excess quotes
+# Strip quotes from column names
 val_data = val_data.toDF(*[col.strip('"') for col in val_data.columns])
 train_data = train_data.toDF(*[col.strip('"') for col in train_data.columns])
 
-# Cast all columns (except label) to float
+# Convert all columns to float
 features = [col for col in train_data.columns if col != "quality"]
-for column in features + ["quality"]:
-    train_data = train_data.withColumn(column, train_data[column].cast("float"))
-    val_data = val_data.withColumn(column, val_data[column].cast("float"))
+for col_name in features + ["quality"]:
+    train_data = train_data.withColumn(col_name, train_data[col_name].cast("float"))
+    val_data = val_data.withColumn(col_name, val_data[col_name].cast("float"))
 
-# Assemble feature vector
+# Assemble features
 assembler = VectorAssembler(inputCols=features, outputCol="features")
 train_data = assembler.transform(train_data)
 val_data = assembler.transform(val_data)
 
-# Train GBT classifier
-gbt = GBTClassifier(labelCol="quality", featuresCol="features", maxIter=50)
-model = gbt.fit(train_data)
+# Train RandomForestClassifier for multiclass
+rf = RandomForestClassifier(labelCol="quality", featuresCol="features", numTrees=50)
+model = rf.fit(train_data)
 
-# Make predictions
+# Predict
 predictions = model.transform(val_data)
 
-# Evaluate model
+# Evaluate
 evaluator = MulticlassClassificationEvaluator(labelCol="quality", predictionCol="prediction", metricName="accuracy")
 accuracy = evaluator.evaluate(predictions)
 
