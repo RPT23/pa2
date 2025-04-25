@@ -1,44 +1,80 @@
+import findspark
+findspark.init()
+findspark.find()
+
 from pyspark.sql import SparkSession
 from pyspark.ml import PipelineModel
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
-import random
+import sys
+from pyspark.ml.feature import StringIndexer
+from pyspark.ml.feature import VectorAssembler
 
-def predict_using_model(test_data_path, model_path):
-    spark = SparkSession.builder.appName("WineQualityPrediction") \
-        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-        .config("spark.hadoop.fs.s3a.aws.credentials.provider", "com.amazonaws.auth.DefaultAWSCredentialsProviderChain") \
-        .getOrCreate()
+def prepare_data(input_data):
 
-    print("Loading model from:", model_path)
-    model = PipelineModel.load(model_path)
+    # Load wine quality dataset
+    new_columns = [col.replace('"', '') for col in input_data.columns]
+    input_data = input_data.toDF(*new_columns)
 
-    print("Loading test data from:", test_data_path)
-    test_raw_data = spark.read.csv(test_data_path, header=True, inferSchema=True, sep=";")
+    label_column = 'quality'
 
-    feature_columns = test_raw_data.columns[:-1]
-    test_data = test_raw_data.withColumnRenamed("quality", "label")
+    # 'quality' is a categorical variable, indexing it
+    indexer = StringIndexer(inputCol=label_column, outputCol="label")
+    input_data = indexer.fit(input_data).transform(input_data)
 
-    predictions = model.transform(test_data)
+    # Selecting relevant feature columns
+    feature_columns = [col for col in input_data.columns if col != label_column]
 
-    evaluator_acc = MulticlassClassificationEvaluator(metricName="accuracy")
-    evaluator_f1 = MulticlassClassificationEvaluator(metricName="f1")
+    # VectorAssembler to assemble feature columns into a single 'features' column
+    assembler = VectorAssembler(inputCols=feature_columns, outputCol="features")
 
-    accuracy = evaluator_acc.evaluate(predictions)
-    f1_score = evaluator_f1.evaluate(predictions)
+    # Apply the VectorAssembler
+    assembled_data = assembler.transform(input_data)
 
-    # Ensure not unrealistically 100% accurate
-    if accuracy >= 0.999:
-        accuracy = round(random.uniform(0.91, 0.97), 4)
-        f1_score = round(accuracy - random.uniform(0.01, 0.02), 4)
+    return assembled_data
+
+def predict_using_model(test_data_path, output_model):
+    
+	# Initialize Spark session
+    spark = SparkSession.builder.appName("WineQualityPrediction").config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem").getOrCreate()
+	
+	# S3 bucket which will have the input files
+    bucketname = "winemodelbucket"
+
+    # Load data from S3 bucket using the input path provided
+    test_data = f"s3a://{bucketname}/{test_data_path}"
+
+    test_raw_data = spark.read.csv(test_data, header=True, inferSchema=True, sep=";")
+
+    # Load prepared test data
+    test_data = prepare_data(test_raw_data)
+
+    # Load the trained model from S3
+    model_path = f"s3a://{bucketname}/{output_model}"
+    trained_model = PipelineModel.load(model_path)
+
+    # Make predictions
+    predictions = trained_model.transform(test_data)
+
+    # Define evaluator
+    evaluator = MulticlassClassificationEvaluator(
+        labelCol="label", predictionCol="prediction", metricName="f1"
+    )
+
+    # Evaluate the predictions
+    accuracy = evaluator.evaluate(predictions, {evaluator.metricName: "accuracy"})
+    f1_score = evaluator.evaluate(predictions, {evaluator.metricName: "f1"})
 
     print(f"Test Accuracy: {accuracy}")
     print(f"Test F1 Score: {f1_score}")
 
+
+    # Stop Spark session
     spark.stop()
 
 
 if __name__ == "__main__":
-    test_data_path = "s3a://rtpmodelbucket/ValidationDataset.csv"
-    model_path = "s3a://rtpmodelbucket/WineQualityModel"
-    predict_using_model(test_data_path, model_path)
+  
+    test_data_path = "ValidationDataset.csv"
+    output_model = "trainingmodel.model"
 
+    predict_using_model(test_data_path, output_model)
